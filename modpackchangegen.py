@@ -132,23 +132,26 @@ def extract_and_compare_configs(old_zip, new_zip):
     new_configs = extract_files_from_zip(new_zip, "overrides/config/")
     config_changes = {}
     for config in set(old_configs.keys()).union(new_configs.keys()):
-        old_file = old_configs.get(config)
-        new_file = new_configs.get(config)
-        diff = compare_files(old_file, new_file)
-        if diff:
-            config_changes[os.path.basename(config)] = diff
+        if "datapacks" not in config:  # Exclude datapacks folder
+            old_file = old_configs.get(config)
+            new_file = new_configs.get(config)
+            diff = compare_files(old_file, new_file)
+            if diff:
+                config_changes[os.path.basename(config)] = diff
     return config_changes
 
 def extract_and_compare_datapacks(old_zip, new_zip):
     old_datapacks = extract_files_from_zip(old_zip, "overrides/config/paxi/datapacks/")
     new_datapacks = extract_files_from_zip(new_zip, "overrides/config/paxi/datapacks/")
+    added_datapacks = set(new_datapacks.keys()) - set(old_datapacks.keys())
+    removed_datapacks = set(old_datapacks.keys()) - set(new_datapacks.keys())
+    
     datapack_changes = {}
-    for datapack in set(old_datapacks.keys()).union(new_datapacks.keys()):
-        old_file = old_datapacks.get(datapack)
-        new_file = new_datapacks.get(datapack)
-        diff = compare_files(old_file, new_file)
-        if diff:
-            datapack_changes[os.path.basename(datapack)] = diff
+    if added_datapacks:
+        datapack_changes["Added"] = list(added_datapacks)
+    if removed_datapacks:
+        datapack_changes["Removed"] = list(removed_datapacks)
+    
     return datapack_changes
 
 def extract_and_compare_custom_mods(old_zip, new_zip):
@@ -216,10 +219,10 @@ def generate_changelog(old_zip, new_zip):
     datapack_changes = extract_and_compare_datapacks(old_zip, new_zip)
     if datapack_changes:
         changelog += "## Forced Datapacks\n"
-        for datapack, diff in datapack_changes.items():
-            if diff.strip():  # Only include changes, not new or removed files
-                changelog += f"### {datapack}\n"
-                changelog += format_diff(diff)
+        if "Added" in datapack_changes:
+            changelog += "### Added\n" + "\n".join(f"- **{os.path.basename(datapack)}**" for datapack in datapack_changes["Added"]) + "\n\n"
+        if "Removed" in datapack_changes:
+            changelog += "### Removed\n" + "\n".join(f"- ~~{os.path.basename(datapack)}~~" for datapack in datapack_changes["Removed"]) + "\n\n"
     
     config_changes = extract_and_compare_configs(old_zip, new_zip)
     if config_changes:
