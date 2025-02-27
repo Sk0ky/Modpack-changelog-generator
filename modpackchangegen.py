@@ -171,7 +171,7 @@ def extract_files_from_zip(zip_path, folder):
                 files[file] = os.path.join(temp_dir, file)
     return files
 
-def generate_changelog(old_zip, new_zip):
+def generate_changelog(old_zip, new_zip, include_updated_mods=True, include_changed_configs=True, include_added_removed_mods=True, include_datapacks=True, include_options_changes=True):
     old_manifest = extract_file_from_zip(old_zip, "manifest.json")
     new_manifest = extract_file_from_zip(new_zip, "manifest.json")
     old_modlist = extract_file_from_zip(old_zip, "modlist.html")
@@ -189,55 +189,54 @@ def generate_changelog(old_zip, new_zip):
     new_mod_links = parse_modlist_html(new_modlist)
     old_mod_links = parse_modlist_html(old_modlist)
     
-    with ThreadPoolExecutor() as executor:
-        mod_infos = {project_id: executor.submit(fetch_mod_info_from_cflookup, project_id) for project_id in new_mods}
-    
-    for project_id, new_file_id in new_mods.items():
-        mod_name, mod_url = mod_infos[project_id].result()
-        old_file_id = old_mods.get(project_id)
-        if old_file_id and old_file_id != new_file_id:
-            old_version = fetch_mod_version(mod_url, old_file_id)
-            new_version = fetch_mod_version(mod_url, new_file_id)
-            updated[mod_name] = f"{old_version} → {new_version}"
+    if include_updated_mods:
+        with ThreadPoolExecutor() as executor:
+            mod_infos = {project_id: executor.submit(fetch_mod_info_from_cflookup, project_id) for project_id in new_mods}
+        
+        for project_id, new_file_id in new_mods.items():
+            mod_name, mod_url = mod_infos[project_id].result()
+            old_file_id = old_mods.get(project_id)
+            if old_file_id and old_file_id != new_file_id:
+                old_version = fetch_mod_version(mod_url, old_file_id)
+                new_version = fetch_mod_version(mod_url, new_file_id)
+                updated[mod_name] = f"{old_version} → {new_version}"
     
     changelog = "# Modpack Changelog\n\n"
-    if added:
-        changelog += "## Added Mods\n" + "\n".join(f"- **[{mod}]({new_mod_links.get(mod, '#')})**" for mod in added) + "\n\n"
-    if removed:
-        changelog += "## Removed Mods\n" + "\n".join(f"- ~~[{mod}]({old_mod_links.get(mod, '#')})~~" for mod in removed) + "\n\n"
-    if updated:
+    
+    if include_added_removed_mods:
+        if added:
+            changelog += "## Added Mods\n" + "\n".join(f"- **[{mod}]({new_mod_links.get(mod, '#')})**" for mod in added) + "\n\n"
+        if removed:
+            changelog += "## Removed Mods\n" + "\n".join(f"- ~~[{mod}]({old_mod_links.get(mod, '#')})~~" for mod in removed) + "\n\n"
+    
+    if include_updated_mods and updated:
         changelog += "## Updated Mods\n" + "\n".join(f"- **[{name}]({new_mod_links.get(name, '#')})**: {version}" for name, version in updated.items()) + "\n\n"
     
-    added_custom_mods, removed_custom_mods = extract_and_compare_custom_mods(old_zip, new_zip)
-    if added_custom_mods or removed_custom_mods:
-        changelog += "## Custom Mods\n"
-        if added_custom_mods:
-            changelog += "### Added\n" + "\n".join(f"- **{mod}**" for mod in added_custom_mods) + "\n\n"
-        if removed_custom_mods:
-            changelog += "### Removed\n" + "\n".join(f"- ~~{mod}~~" for mod in removed_custom_mods) + "\n\n"
+    if include_datapacks:
+        datapack_changes = extract_and_compare_datapacks(old_zip, new_zip)
+        if datapack_changes:
+            changelog += "## Forced Datapacks\n"
+            if "Added" in datapack_changes:
+                changelog += "### Added\n" + "\n".join(f"- **{os.path.basename(datapack)}**" for datapack in datapack_changes["Added"]) + "\n\n"
+            if "Removed" in datapack_changes:
+                changelog += "### Removed\n" + "\n".join(f"- ~~{os.path.basename(datapack)}~~" for datapack in datapack_changes["Removed"]) + "\n\n"
     
-    datapack_changes = extract_and_compare_datapacks(old_zip, new_zip)
-    if datapack_changes:
-        changelog += "## Forced Datapacks\n"
-        if "Added" in datapack_changes:
-            changelog += "### Added\n" + "\n".join(f"- **{os.path.basename(datapack)}**" for datapack in datapack_changes["Added"]) + "\n\n"
-        if "Removed" in datapack_changes:
-            changelog += "### Removed\n" + "\n".join(f"- ~~{os.path.basename(datapack)}~~" for datapack in datapack_changes["Removed"]) + "\n\n"
+    if include_changed_configs:
+        config_changes = extract_and_compare_configs(old_zip, new_zip)
+        if config_changes:
+            changelog += "## Config Changes\n"
+            for config, diff in config_changes.items():
+                if diff.strip():  # Only include changes, not new or removed files
+                    changelog += f"### {config}\n"
+                    changelog += format_diff(diff)
     
-    config_changes = extract_and_compare_configs(old_zip, new_zip)
-    if config_changes:
-        changelog += "## Config Changes\n"
-        for config, diff in config_changes.items():
-            if diff.strip():  # Only include changes, not new or removed files
-                changelog += f"### {config}\n"
-                changelog += format_diff(diff)
-    
-    old_options = extract_file_from_zip(old_zip, "overrides/options.txt")
-    new_options = extract_file_from_zip(new_zip, "overrides/options.txt")
-    options_diff = compare_files(old_options, new_options)
-    if options_diff.strip():  # Only include changes, not new or removed files
-        changelog += "## Options Changes\n"
-        changelog += format_diff(options_diff)
+    if include_options_changes:
+        old_options = extract_file_from_zip(old_zip, "overrides/options.txt")
+        new_options = extract_file_from_zip(new_zip, "overrides/options.txt")
+        options_diff = compare_files(old_options, new_options)
+        if options_diff.strip():  # Only include changes, not new or removed files
+            changelog += "## Options Changes\n"
+            changelog += format_diff(options_diff)
     
     return changelog
 
@@ -276,6 +275,21 @@ class ModpackChangelogApp:
         tk.Entry(frame, textvariable=self.new_folder, width=50).grid(row=1, column=1, padx=5, pady=5)
         tk.Button(frame, text="Browse", command=self.select_new_folder).grid(row=1, column=2, padx=5, pady=5)
         
+        self.include_updated_mods = tk.BooleanVar(value=True)
+        self.include_changed_configs = tk.BooleanVar(value=True)
+        self.include_added_removed_mods = tk.BooleanVar(value=True)
+        self.include_datapacks = tk.BooleanVar(value=True)
+        self.include_options_changes = tk.BooleanVar(value=True)
+        
+        settings_frame = tk.LabelFrame(self.root, text="Changelog Settings")
+        settings_frame.pack(pady=10, padx=10, fill="x")
+        
+        tk.Checkbutton(settings_frame, text="Include Updated Mods", variable=self.include_updated_mods).pack(anchor="w")
+        tk.Checkbutton(settings_frame, text="Include Changed Configs", variable=self.include_changed_configs).pack(anchor="w")
+        tk.Checkbutton(settings_frame, text="Include Added/Removed Mods", variable=self.include_added_removed_mods).pack(anchor="w")
+        tk.Checkbutton(settings_frame, text="Include Datapacks", variable=self.include_datapacks).pack(anchor="w")
+        tk.Checkbutton(settings_frame, text="Include Options Changes", variable=self.include_options_changes).pack(anchor="w")
+        
         tk.Button(self.root, text="Generate Changelog", command=self.generate_changelog).pack(pady=10)
         tk.Button(self.root, text="Save Changelog", command=self.save_changelog).pack(pady=10)
         
@@ -289,7 +303,15 @@ class ModpackChangelogApp:
         self.new_folder.set(filedialog.askopenfilename(filetypes=[("ZIP files", "*.zip")]))
     
     def generate_changelog(self):
-        self.changelog = generate_changelog(self.old_folder.get(), self.new_folder.get())
+        self.changelog = generate_changelog(
+            self.old_folder.get(),
+            self.new_folder.get(),
+            include_updated_mods=self.include_updated_mods.get(),
+            include_changed_configs=self.include_changed_configs.get(),
+            include_added_removed_mods=self.include_added_removed_mods.get(),
+            include_datapacks=self.include_datapacks.get(),
+            include_options_changes=self.include_options_changes.get()
+        )
         self.text_area.delete(1.0, tk.END)
         self.text_area.insert(tk.END, self.changelog)
     
