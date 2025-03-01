@@ -18,6 +18,41 @@ from webdriver_manager.chrome import ChromeDriverManager
 from functools import lru_cache
 from concurrent.futures import ThreadPoolExecutor
 import difflib
+from tkinter import ttk
+
+class PersistentChromeBrowser:
+    def __init__(self):
+        self.driver = None
+    
+    def get_driver(self):
+        if self.driver is None:
+            options = Options()
+            # Don't use headless mode - CurseForge detects it
+            # options.add_argument("--headless")
+            options.add_argument("--headless=new")  # Use newer headless implementation
+            options.add_argument("--no-sandbox")
+            options.add_argument("--disable-dev-shm-usage")
+            options.add_argument("--disable-blink-features=AutomationControlled")
+            options.add_argument("--window-size=1920,1080")  # Set a realistic window size
+            options.add_argument("--window-position=-32000,-32000")  # Position window off-screen
+            options.add_experimental_option("excludeSwitches", ["enable-automation"])
+            options.add_experimental_option('useAutomationExtension', False)
+            options.add_argument(f"user-agent=Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/123.0.0.0 Safari/537.36")
+            
+            service = Service(ChromeDriverManager().install())
+            self.driver = webdriver.Chrome(service=service, options=options)
+            
+            # Execute CDP commands to prevent detection
+            self.driver.execute_cdp_cmd('Network.setUserAgentOverride', {
+                "userAgent": 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/123.0.0.0 Safari/537.36'
+            })
+            self.driver.execute_script("Object.defineProperty(navigator, 'webdriver', {get: () => undefined})")
+        return self.driver
+    
+    def close(self):
+        if self.driver:
+            self.driver.quit()
+            self.driver = None
 
 def extract_file_from_zip(zip_path, filename):
     temp_dir = tempfile.mkdtemp()
@@ -55,33 +90,47 @@ def fetch_mod_info_from_cflookup(project_id):
         print(f"Request Error: {e}")
         return f"Mod {project_id}", None
 
-def fetch_mod_version(mod_url, file_id):
+def fetch_mod_version(mod_url, file_id, browser):
     try:
-        options = Options()
-        options.headless = True
-        options.add_argument("--disable-blink-features=AutomationControlled")
-        
-        service = Service(ChromeDriverManager().install())
-        driver = webdriver.Chrome(service=service, options=options)
+        driver = browser.get_driver()
         version_url = f"{mod_url}/files/{file_id}"
         print(f"Fetching: {version_url}")
         driver.get(version_url)
-        time.sleep(5)
         
-        filename = "Unknown Version"
+        # Wait more dynamically instead of fixed sleep
         try:
+            # First try to wait for the right element
+            WebDriverWait(driver, 10).until(
+                EC.presence_of_element_located((By.CSS_SELECTOR, "section.section-file-info h2"))
+            )
             filename_element = driver.find_element(By.CSS_SELECTOR, "section.section-file-info h2")
             filename = filename_element.text.strip()
-        except Exception:
+            
+            # If we got an empty string, try alternative selectors
+            if not filename:
+                # Try alternative selectors
+                try:
+                    filename_element = driver.find_element(By.CSS_SELECTOR, ".file-name span")
+                    filename = filename_element.text.strip()
+                except:
+                    pass
+                
+                if not filename:
+                    try:
+                        filename_element = driver.find_element(By.CSS_SELECTOR, "h3.font-bold")
+                        filename = filename_element.text.strip()
+                    except:
+                        pass
+        except Exception as e:
+            print(f"Element not found: {e}")
+            # Take a screenshot for debugging
+            driver.save_screenshot(f"debug_{file_id}.png")
             filename = "File not found!"
         
-        driver.quit()
         return filename
     except Exception as e:
         print(f"Error fetching file name: {e}")
         return "Unknown Version"
-    finally:
-        driver.quit()
 
 def extract_mods_from_manifest(manifest_path):
     if not os.path.exists(manifest_path):
@@ -193,13 +242,17 @@ def generate_changelog(old_zip, new_zip, include_updated_mods=True, include_chan
         with ThreadPoolExecutor() as executor:
             mod_infos = {project_id: executor.submit(fetch_mod_info_from_cflookup, project_id) for project_id in new_mods}
         
-        for project_id, new_file_id in new_mods.items():
-            mod_name, mod_url = mod_infos[project_id].result()
-            old_file_id = old_mods.get(project_id)
-            if old_file_id and old_file_id != new_file_id:
-                old_version = fetch_mod_version(mod_url, old_file_id)
-                new_version = fetch_mod_version(mod_url, new_file_id)
-                updated[mod_name] = f"{old_version} → {new_version}"
+        browser = PersistentChromeBrowser()
+        try:
+            for project_id, new_file_id in new_mods.items():
+                mod_name, mod_url = mod_infos[project_id].result()
+                old_file_id = old_mods.get(project_id)
+                if old_file_id and old_file_id != new_file_id:
+                    old_version = fetch_mod_version(mod_url, old_file_id, browser)
+                    new_version = fetch_mod_version(mod_url, new_file_id, browser)
+                    updated[mod_name] = f"{old_version} → {new_version}"
+        finally:
+            browser.close()
     
     changelog = "# Modpack Changelog\n\n"
     
@@ -293,6 +346,16 @@ class ModpackChangelogApp:
         tk.Button(self.root, text="Generate Changelog", command=self.generate_changelog).pack(pady=10)
         tk.Button(self.root, text="Save Changelog", command=self.save_changelog).pack(pady=10)
         
+        self.status_frame = tk.Frame(self.root)
+        self.status_frame.pack(fill="x", padx=10, pady=5)
+        
+        self.status_label = tk.Label(self.status_frame, text="Ready")
+        self.status_label.pack(side="left")
+        
+        self.progress_bar = ttk.Progressbar(self.status_frame, orient="horizontal", 
+                                           length=300, mode="determinate")
+        self.progress_bar.pack(side="right", padx=10)
+        
         self.text_area = scrolledtext.ScrolledText(self.root, wrap=tk.WORD, width=100, height=30)
         self.text_area.pack(padx=10, pady=10, fill=tk.BOTH, expand=True)
     
@@ -303,17 +366,157 @@ class ModpackChangelogApp:
         self.new_folder.set(filedialog.askopenfilename(filetypes=[("ZIP files", "*.zip")]))
     
     def generate_changelog(self):
-        self.changelog = generate_changelog(
-            self.old_folder.get(),
-            self.new_folder.get(),
-            include_updated_mods=self.include_updated_mods.get(),
-            include_changed_configs=self.include_changed_configs.get(),
-            include_added_removed_mods=self.include_added_removed_mods.get(),
-            include_datapacks=self.include_datapacks.get(),
-            include_options_changes=self.include_options_changes.get()
-        )
+        old_path = self.old_folder.get()
+        new_path = self.new_folder.get()
+        
+        if not old_path or not new_path:
+            messagebox.showerror("Error", "Please select both old and new modpack zip files")
+            return
+        
+        # Reset UI state
+        self.progress_bar["value"] = 0
+        self.status_label.config(text="Initializing...")
+        self.text_area.delete(1.0, tk.END)
+        
+        # Run the actual generation in a separate thread
+        threading.Thread(target=self._run_changelog_generation, 
+                        args=(old_path, new_path), 
+                        daemon=True).start()
+    
+    def _run_changelog_generation(self, old_path, new_path):
+        try:
+            # Extract manifest files to get mod counts
+            old_manifest = extract_file_from_zip(old_path, "manifest.json")
+            new_manifest = extract_file_from_zip(new_path, "manifest.json")
+            
+            self.root.after(0, lambda: self.status_label.config(text="Loading mod information..."))
+            
+            # Load mod data
+            old_mods = extract_mods_from_manifest(old_manifest) if old_manifest else {}
+            new_mods = extract_mods_from_manifest(new_manifest) if new_manifest else {}
+            
+            # Setup for tracking updated mods
+            updated_mods_count = 0
+            potential_updated_mods = 0
+            
+            for project_id, new_file_id in new_mods.items():
+                old_file_id = old_mods.get(project_id)
+                if old_file_id and old_file_id != new_file_id:
+                    potential_updated_mods += 1
+            
+            # Only proceed if we have mods to update
+            if potential_updated_mods > 0:
+                browser = PersistentChromeBrowser()
+                
+                try:
+                    # Fetch mod info concurrently
+                    with ThreadPoolExecutor() as executor:
+                        mod_infos = {project_id: executor.submit(fetch_mod_info_from_cflookup, project_id) 
+                                    for project_id in new_mods}
+                    
+                    # Process each mod with progress updates
+                    updated_mods = {}
+                    for project_id, new_file_id in new_mods.items():
+                        old_file_id = old_mods.get(project_id)
+                        
+                        if old_file_id and old_file_id != new_file_id:
+                            # Update status
+                            mod_name, mod_url = mod_infos[project_id].result()
+                            self.root.after(0, lambda text=f"Fetching: {mod_name}": 
+                                self.status_label.config(text=text))
+                            
+                            # Fetch versions
+                            old_version = fetch_mod_version(mod_url, old_file_id, browser)
+                            new_version = fetch_mod_version(mod_url, new_file_id, browser)
+                            updated_mods[mod_name] = f"{old_version} → {new_version}"
+                            
+                            # Update progress
+                            updated_mods_count += 1
+                            progress = (updated_mods_count / potential_updated_mods) * 100
+                            self.root.after(0, lambda p=progress: self._update_progress(p))
+                    
+                finally:
+                    browser.close()
+                
+                # Generate the changelog
+                self.root.after(0, lambda: self.status_label.config(text="Generating changelog..."))
+                self.changelog = self._generate_full_changelog(old_path, new_path, updated_mods)
+                
+                # Update UI with result
+                self.root.after(0, lambda: self._update_ui_with_changelog())
+            else:
+                self.root.after(0, lambda: self.status_label.config(text="No mod updates found"))
+                
+        except Exception as e:
+            self.root.after(0, lambda: messagebox.showerror("Error", f"An error occurred: {str(e)}"))
+            self.root.after(0, lambda: self.status_label.config(text="Error occurred"))
+    
+    def _update_progress(self, value):
+        self.progress_bar["value"] = value
+    
+    def _update_ui_with_changelog(self):
         self.text_area.delete(1.0, tk.END)
         self.text_area.insert(tk.END, self.changelog)
+        self.status_label.config(text="Changelog generation complete")
+        self.progress_bar["value"] = 100
+    
+    def _generate_full_changelog(self, old_zip, new_zip, updated_mods):
+        # Extract all the non-mod version parts of the changelog generation
+        # This code is similar to the existing generate_changelog function but uses
+        # the already fetched updated_mods instead of fetching them again
+        
+        old_manifest = extract_file_from_zip(old_zip, "manifest.json")
+        new_manifest = extract_file_from_zip(new_zip, "manifest.json")
+        old_modlist = extract_file_from_zip(old_zip, "modlist.html")
+        new_modlist = extract_file_from_zip(new_zip, "modlist.html")
+        
+        old_modlist_set = extract_mods_from_modlist(old_modlist) if old_modlist else set()
+        new_modlist_set = extract_mods_from_modlist(new_modlist) if new_modlist else set()
+        
+        added = new_modlist_set - old_modlist_set
+        removed = old_modlist_set - new_modlist_set
+        
+        new_mod_links = parse_modlist_html(new_modlist)
+        old_mod_links = parse_modlist_html(old_modlist)
+        
+        changelog = "# Modpack Changelog\n\n"
+        
+        if self.include_added_removed_mods.get():
+            if added:
+                changelog += "## Added Mods\n" + "\n".join(f"- **[{mod}]({new_mod_links.get(mod, '#')})**" for mod in added) + "\n\n"
+            if removed:
+                changelog += "## Removed Mods\n" + "\n".join(f"- ~~[{mod}]({old_mod_links.get(mod, '#')})~~" for mod in removed) + "\n\n"
+        
+        if self.include_updated_mods.get() and updated_mods:
+            changelog += "## Updated Mods\n" + "\n".join(f"- **[{name}]({new_mod_links.get(name, '#')})**: {version}" for name, version in updated_mods.items()) + "\n\n"
+        
+        if self.include_datapacks.get():
+            datapack_changes = extract_and_compare_datapacks(old_zip, new_zip)
+            if datapack_changes:
+                changelog += "## Forced Datapacks\n"
+                if "Added" in datapack_changes:
+                    changelog += "### Added\n" + "\n".join(f"- **{os.path.basename(datapack)}**" for datapack in datapack_changes["Added"]) + "\n\n"
+                if "Removed" in datapack_changes:
+                    changelog += "### Removed\n" + "\n".join(f"- ~~{os.path.basename(datapack)}~~" for datapack in datapack_changes["Removed"]) + "\n\n"
+        
+        if self.include_changed_configs.get():
+            config_changes = extract_and_compare_configs(old_zip, new_zip)
+            if config_changes:
+                changelog += "## Config Changes\n"
+                for config, diff in config_changes.items():
+                    if diff.strip():  # Only include changes, not new or removed files
+                        changelog += f"### {config}\n"
+                        changelog += format_diff(diff)
+        
+        if self.include_options_changes.get():
+            old_options = extract_file_from_zip(old_zip, "overrides/options.txt")
+            new_options = extract_file_from_zip(new_zip, "overrides/options.txt")
+            options_diff = compare_files(old_options, new_options)
+            if options_diff.strip():  # Only include changes, not new or removed files
+                changelog += "## Options Changes\n"
+                changelog += format_diff(options_diff)
+        
+        return changelog
     
     def save_changelog(self):
         file_path = filedialog.asksaveasfilename(defaultextension=".md", filetypes=[("Markdown files", "*.md")])
