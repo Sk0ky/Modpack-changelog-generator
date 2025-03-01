@@ -19,6 +19,10 @@ from functools import lru_cache
 from concurrent.futures import ThreadPoolExecutor
 import difflib
 from tkinter import ttk
+import pickle
+import os.path
+import re
+import markdown
 
 class PersistentChromeBrowser:
     def __init__(self):
@@ -27,7 +31,6 @@ class PersistentChromeBrowser:
     def get_driver(self):
         if self.driver is None:
             options = Options()
-            # Don't use headless mode - CurseForge detects it
             # options.add_argument("--headless")
             options.add_argument("--headless=new")  # Use newer headless implementation
             options.add_argument("--no-sandbox")
@@ -315,6 +318,72 @@ def format_diff(diff):
             formatted_diff += f"  {line}\n"
     return formatted_diff
 
+def format_diff_for_display(diff):
+    """Format diff output to only show changes to existing lines, hiding additions/removals"""
+    formatted_lines = []
+    removed_lines = []
+    added_lines = []
+    
+    # First pass: collect all added and removed lines
+    for line in diff.splitlines():
+        if line.startswith('---') or line.startswith('+++') or line.startswith('@@') or line.startswith(' '):
+            continue
+            
+        # Skip timestamp lines
+        if line.startswith('-') or line.startswith('+'):
+            content = line[1:].strip()
+            if (content.startswith('#') and 
+                (any(tz in content for tz in ["CET", "UTC", "GMT", "EST", "PST", "PDT", "EDT"]) or
+                 any(month in content for month in ["Jan", "Feb", "Mar", "Apr", "May", "Jun", 
+                      "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"]))):
+                continue
+        
+        if line.startswith('-'):
+            removed_lines.append(line[1:])
+        elif line.startswith('+'):
+            added_lines.append(line[1:])
+    
+    # Second pass: only include pairs of lines that are similar (actual changes)
+    i, j = 0, 0
+    while i < len(removed_lines) and j < len(added_lines):
+        removed = removed_lines[i]
+        added = added_lines[j]
+        
+        # Are these lines similar? (likely a change rather than insert/delete)
+        if similarity_score(removed, added) > 0.5:  # Threshold for considering it a change
+            formatted_lines.append(f"Changed: {removed}")
+            formatted_lines.append(f"Changed to: {added}")
+            i += 1
+            j += 1
+        else:
+            # Not similar enough, so advance both counters to look for better matches
+            # This skips pure additions/removals as requested
+            i += 1
+            j += 1
+    
+    # Don't include any remaining lines since they're pure additions/removals
+    
+    return '\n'.join(formatted_lines)
+
+# Helper function to assess similarity between two strings
+def similarity_score(str1, str2):
+    """Calculate a similarity score between 0 and 1"""
+    # Simple implementation - can be improved
+    if '=' in str1 and '=' in str2:
+        # For config lines with key=value format, compare the keys
+        key1 = str1.split('=')[0].strip()
+        key2 = str2.split('=')[0].strip()
+        return 1.0 if key1 == key2 else 0.0
+    
+    # For other formats, use string similarity
+    try:
+        import difflib
+        return difflib.SequenceMatcher(None, str1, str2).ratio()
+    except:
+        # Fallback if difflib not available
+        common = set(str1) & set(str2)
+        return len(common) / max(len(set(str1)), len(set(str2)))
+
 class ModpackChangelogApp:
     def __init__(self, root):
         self.root = root
@@ -371,8 +440,28 @@ class ModpackChangelogApp:
         tk.Checkbutton(self.dropdown_menu, text="Custom Mods (overrides/mods folder)", 
                     variable=self.include_custom_mods).pack(anchor="w", padx=5, pady=2)
         
-        tk.Button(self.root, text="Generate Changelog", command=self.generate_changelog).pack(pady=10)
-        tk.Button(self.root, text="Save Changelog", command=self.save_changelog).pack(pady=10)
+        # Add this to the ModpackChangelogApp.__init__ method after the Generate and Save buttons
+
+        # Create button frame with Generate, Stop, and Save buttons
+        button_frame = tk.Frame(self.root)
+        button_frame.pack(pady=10)
+
+        self.generate_button = tk.Button(button_frame, text="Generate Changelog", command=self.generate_changelog)
+        self.generate_button.pack(side=tk.LEFT, padx=5)
+
+        self.stop_button = tk.Button(button_frame, text="Stop Generation", command=self.stop_generation, state=tk.DISABLED)
+        self.stop_button.pack(side=tk.LEFT, padx=5)
+
+        self.save_button = tk.Button(button_frame, text="Save Changelog", command=self.save_changelog)
+        self.save_button.pack(side=tk.LEFT, padx=5)
+
+        # Remove the old buttons that are now in the button_frame
+        # (Delete these two lines)
+        # tk.Button(self.root, text="Generate Changelog", command=self.generate_changelog).pack(pady=10)
+        # tk.Button(self.root, text="Save Changelog", command=self.save_changelog).pack(pady=10)
+
+        # Add cancellation flag
+        self.is_cancelled = False
         
         self.status_frame = tk.Frame(self.root)
         self.status_frame.pack(fill="x", padx=10, pady=5)
@@ -398,12 +487,84 @@ class ModpackChangelogApp:
                     self.dropdown_button.config(text="Sections to Include ▼")
                     
         self.root.bind('<Button-1>', close_dropdown)
+        
+        # Recent files history
+        self.history_file = os.path.join(os.path.expanduser("~"), ".modpack_changelog_history")
+        self.recent_files = {"old": [], "new": []}
+        self.load_recent_files()
+        
+        # Add dropdown menus for recent files
+        if self.recent_files["old"]:
+            old_dropdown = tk.OptionMenu(frame, self.old_folder, *self.recent_files["old"])
+            old_dropdown.grid(row=0, column=3, padx=5, pady=5)
+            old_dropdown.config(width=15)
+        else:
+            old_label = tk.Label(frame, text="No recent files")
+            old_label.grid(row=0, column=3, padx=5, pady=5)
+
+        if self.recent_files["new"]:
+            new_dropdown = tk.OptionMenu(frame, self.new_folder, *self.recent_files["new"]) 
+            new_dropdown.grid(row=1, column=3, padx=5, pady=5)
+            new_dropdown.config(width=15)
+        else:
+            new_label = tk.Label(frame, text="No recent files")
+            new_label.grid(row=1, column=3, padx=5, pady=5)
+        
+        # Add search frame
+        search_frame = tk.Frame(self.root)
+        search_frame.pack(fill="x", padx=10, pady=5, before=self.text_area)
+        
+        self.search_var = tk.StringVar()
+        tk.Label(search_frame, text="Search:").pack(side="left", padx=5)
+        tk.Entry(search_frame, textvariable=self.search_var, width=30).pack(side="left", padx=5)
+        tk.Button(search_frame, text="Find", command=self.search_changelog).pack(side="left", padx=5)
+        tk.Button(search_frame, text="Clear", command=self.clear_search).pack(side="left", padx=5)
+        
+        # Add filter options
+        self.filter_var = tk.StringVar(value="All")
+        filter_options = ["All", "Added Mods", "Removed Mods", "Updated Mods", "Config Changes"]
+        tk.Label(search_frame, text="Filter:").pack(side="left", padx=10)
+        tk.OptionMenu(search_frame, self.filter_var, *filter_options, command=self.apply_filter).pack(side="left")
     
+    def load_recent_files(self):
+        try:
+            if os.path.exists(self.history_file):
+                with open(self.history_file, 'rb') as f:
+                    self.recent_files = pickle.load(f)
+        except Exception as e:
+            print(f"Error loading history: {e}")
+            self.recent_files = {"old": [], "new": []}
+
+    def save_recent_files(self):
+        try:
+            # Keep only the last 5 entries
+            self.recent_files["old"] = self.recent_files["old"][:5] 
+            self.recent_files["new"] = self.recent_files["new"][:5]
+            
+            with open(self.history_file, 'wb') as f:
+                pickle.dump(self.recent_files, f)
+        except Exception as e:
+            print(f"Error saving history: {e}")
+
     def select_old_folder(self):
-        self.old_folder.set(filedialog.askopenfilename(filetypes=[("ZIP files", "*.zip")]))
+        path = filedialog.askopenfilename(filetypes=[("ZIP files", "*.zip")])
+        if path:
+            self.old_folder.set(path)
+            # Update history
+            if path in self.recent_files["old"]:
+                self.recent_files["old"].remove(path)
+            self.recent_files["old"].insert(0, path)
+            self.save_recent_files()
     
     def select_new_folder(self):
-        self.new_folder.set(filedialog.askopenfilename(filetypes=[("ZIP files", "*.zip")]))
+        path = filedialog.askopenfilename(filetypes=[("ZIP files", "*.zip")])
+        if path:
+            self.new_folder.set(path)
+            # Update history
+            if path in self.recent_files["new"]:
+                self.recent_files["new"].remove(path)
+            self.recent_files["new"].insert(0, path)
+            self.save_recent_files()
     
     def generate_changelog(self):
         old_path = self.old_folder.get()
@@ -417,6 +578,11 @@ class ModpackChangelogApp:
         self.progress_bar["value"] = 0
         self.status_label.config(text="Initializing...")
         self.text_area.delete(1.0, tk.END)
+        self.is_cancelled = False
+        
+        # Update button states
+        self.generate_button.config(state=tk.DISABLED)
+        self.stop_button.config(state=tk.NORMAL)
         
         # Run the actual generation in a separate thread
         threading.Thread(target=self._run_changelog_generation, 
@@ -429,6 +595,10 @@ class ModpackChangelogApp:
             old_manifest = extract_file_from_zip(old_path, "manifest.json")
             new_manifest = extract_file_from_zip(new_path, "manifest.json")
             
+            if self.is_cancelled:
+                self._handle_generation_end()
+                return
+                
             self.root.after(0, lambda: self.status_label.config(text="Loading mod information..."))
             
             # Load mod data
@@ -438,8 +608,8 @@ class ModpackChangelogApp:
             # Initialize empty updated_mods
             updated_mods = {}
             
-            # Only fetch mod updates if the option is enabled
-            if self.include_updated_mods.get():
+            # Only fetch mod updates if the option is enabled and not cancelled
+            if self.include_updated_mods.get() and not self.is_cancelled:
                 # Setup for tracking updated mods
                 updated_mods_count = 0
                 potential_updated_mods = 0
@@ -461,6 +631,8 @@ class ModpackChangelogApp:
                         
                         # Process each mod with progress updates
                         for project_id, new_file_id in new_mods.items():
+                            if self.is_cancelled:
+                                break
                             old_file_id = old_mods.get(project_id)
                             
                             if old_file_id and old_file_id != new_file_id:
@@ -487,16 +659,21 @@ class ModpackChangelogApp:
                     finally:
                         browser.close()
             
-            # Generate the changelog
-            self.root.after(0, lambda: self.status_label.config(text="Generating changelog..."))
-            self.changelog = self._generate_full_changelog(old_path, new_path, updated_mods)
-            
-            # Update UI with result
-            self.root.after(0, lambda: self._update_ui_with_changelog())
+            # Only generate changelog if not cancelled
+            if not self.is_cancelled:
+                # Generate the changelog
+                self.root.after(0, lambda: self.status_label.config(text="Generating changelog..."))
+                self.changelog = self._generate_full_changelog(old_path, new_path, updated_mods)
                 
+                # Update UI with result
+                self.root.after(0, lambda: self._update_ui_with_changelog())
+            else:
+                self._handle_generation_end()
+                    
         except Exception as e:
             self.root.after(0, lambda: messagebox.showerror("Error", f"An error occurred: {str(e)}"))
             self.root.after(0, lambda: self.status_label.config(text="Error occurred"))
+            self.root.after(0, lambda: self._handle_generation_end())
     
     def _update_progress(self, value):
         self.progress_bar["value"] = value
@@ -506,6 +683,7 @@ class ModpackChangelogApp:
         self.text_area.insert(tk.END, self.changelog)
         self.status_label.config(text="Changelog generation complete")
         self.progress_bar["value"] = 100
+        self._handle_generation_end()  # Reset buttons
     
     def _generate_full_changelog(self, old_zip, new_zip, updated_mods):
         # Extract all the non-mod version parts of the changelog generation
@@ -526,13 +704,26 @@ class ModpackChangelogApp:
         new_mod_links = parse_modlist_html(new_modlist)
         old_mod_links = parse_modlist_html(old_modlist)
         
-        changelog = "# Modpack Changelog\n\n"
+        old_ver, new_ver = self._detect_versions(old_zip, new_zip)
+        changelog = f"# Modpack Changelog: {old_ver} → {new_ver}\n\n"
+        
+        # Also add a version summary section at the top
+        changelog += f"*Updated from version {old_ver} to {new_ver}*\n\n"
         
         if self.include_added_removed_mods.get():
             if added:
-                changelog += "## Added Mods\n" + "\n".join(f"- **[{mod}]({new_mod_links.get(mod, '#')})**" for mod in added) + "\n\n"
+                changelog += "## Added Mods\n"
+                # Simple alphabetical list instead of categorization
+                for mod in sorted(added):
+                    changelog += f"- **[{mod}]({new_mod_links.get(mod, '#')})**\n"
+                changelog += "\n"
+            
             if removed:
-                changelog += "## Removed Mods\n" + "\n".join(f"- ~~[{mod}]({old_mod_links.get(mod, '#')})~~" for mod in removed) + "\n\n"
+                changelog += "## Removed Mods\n"
+                # Simple alphabetical list instead of categorization
+                for mod in sorted(removed):
+                    changelog += f"- ~~[{mod}]({old_mod_links.get(mod, '#')})~~\n"
+                changelog += "\n"
         
         if self.include_updated_mods.get() and updated_mods:
             changelog += "## Updated Mods\n" + "\n".join(
@@ -576,8 +767,9 @@ class ModpackChangelogApp:
                 changelog += "## Config Changes\n"
                 for config, diff in config_changes.items():
                     if diff.strip():  # Only include changes, not new or removed files
-                        changelog += f"### {config}\n"
-                        changelog += format_diff(diff)
+                        changelog += f"<details>\n<summary><strong>{config}</strong></summary>\n\n```\n"
+                        changelog += format_diff_for_display(diff)  # Use the new function here
+                        changelog += "\n```\n</details>\n\n"
         
         if self.include_options_changes.get():
             old_options = extract_file_from_zip(old_zip, "overrides/options.txt")
@@ -585,15 +777,111 @@ class ModpackChangelogApp:
             options_diff = compare_files(old_options, new_options)
             if options_diff.strip():  # Only include changes, not new or removed files
                 changelog += "## Options Changes\n"
-                changelog += format_diff(options_diff)
+                changelog += "<details>\n<summary><strong>Click to expand options.txt changes</strong></summary>\n\n```\n"
+                changelog += format_diff_for_display(options_diff)  # Use the new function here
+                changelog += "\n```\n</details>\n\n"
         
         return changelog
     
     def save_changelog(self):
-        file_path = filedialog.asksaveasfilename(defaultextension=".md", filetypes=[("Markdown files", "*.md")])
+        file_types = [
+            ("Markdown", "*.md"),
+            ("HTML", "*.html"), 
+            ("BBCode for Forums", "*.txt"),
+            ("Reddit Markdown", "*.reddit")
+        ]
+        file_path = filedialog.asksaveasfilename(defaultextension=".md", filetypes=file_types)
+        
         if file_path:
+            format_type = os.path.splitext(file_path)[1].lower()
+            content = self.changelog  # Default markdown
+            
+            if format_type == '.html':
+                content = self._convert_to_html()
+            elif format_type == '.txt':
+                content = self._convert_to_bbcode()
+            elif format_type == '.reddit':
+                content = self._convert_to_reddit()
+            
             with open(file_path, "w", encoding="utf-8") as file:
-                file.write(self.changelog)
+                file.write(content)
+                self.status_label.config(text=f"Changelog saved as {os.path.basename(file_path)}")
+
+    def _convert_to_html(self):
+        """Convert the markdown changelog to HTML format"""
+        try:
+            import markdown
+            html = f"""
+            <!DOCTYPE html>
+            <html>
+            <head>
+                <meta charset="utf-8">
+                <title>Modpack Changelog</title>
+                <style>
+                    body {{ font-family: Arial, sans-serif; margin: 40px; line-height: 1.6; }}
+                    h1 {{ color: #333; }}
+                    h2 {{ color: #444; margin-top: 30px; border-bottom: 1px solid #ddd; }}
+                    h3 {{ color: #555; }}
+                    details {{ margin-bottom: 15px; }}
+                    summary {{ cursor: pointer; font-weight: bold; }}
+                    pre {{ background-color: #f5f5f5; padding: 15px; border-radius: 5px; overflow-x: auto; }}
+                    .added {{ color: #2e7d32; }}
+                    .removed {{ color: #c62828; text-decoration: line-through; }}
+                    .changed {{ color: #1565c0; }}
+                    .changed-to {{ color: #0277bd; }}
+                </style>
+            </head>
+            <body>
+                {markdown.markdown(self.changelog, extensions=['tables', 'fenced_code'])}
+            </body>
+            </html>
+            """
+            return html
+        except ImportError:
+            # Fallback if markdown module isn't available
+            messagebox.showinfo("Module Missing", "Please install the 'markdown' module for better HTML conversion")
+            simple_html = self.changelog.replace("\n", "<br>")
+            simple_html = simple_html.replace("# ", "<h1>").replace("## ", "<h2>").replace("### ", "<h3>")
+            simple_html = simple_html.replace("- ", "• ").replace("```", "<pre>").replace("</pre><br>", "</pre>")
+            return f"<html><body>{simple_html}</body></html>"
+
+    def _convert_to_bbcode(self):
+        """Convert the markdown changelog to BBCode for forums"""
+        bbcode = self.changelog
+        
+        # Headers
+        bbcode = re.sub(r'^# (.+)$', r'[size=6][b]\1[/b][/size]', bbcode, flags=re.MULTILINE)
+        bbcode = re.sub(r'^## (.+)$', r'[size=5][b]\1[/b][/size]', bbcode, flags=re.MULTILINE)
+        bbcode = re.sub(r'^### (.+)$', r'[size=4][b]\1[/b][/size]', bbcode, flags=re.MULTILINE)
+        
+        # Links
+        bbcode = re.sub(r'\[(.+?)\]\((.+?)\)', r'[url=\2]\1[/url]', bbcode)
+        
+        # Bold
+        bbcode = re.sub(r'\*\*(.+?)\*\*', r'[b]\1[/b]', bbcode)
+        
+        # Code blocks
+        bbcode = re.sub(r'```(?:\w+)?\n(.*?)\n```', r'[code]\1[/code]', bbcode, flags=re.DOTALL)
+        
+        # Lists
+        bbcode = re.sub(r'^- ', r'[*] ', bbcode, flags=re.MULTILINE)
+        
+        # Spoiler tags (for detailed sections)
+        bbcode = re.sub(r'<details>\s*<summary>(.+?)</summary>', r'[spoiler=\1]', bbcode)
+        bbcode = re.sub(r'</details>', r'[/spoiler]', bbcode)
+        
+        return bbcode
+
+    def _convert_to_reddit(self):
+        """Convert to Reddit-friendly markdown"""
+        reddit_md = self.changelog
+        
+        # Replace HTML details/summary with Reddit spoiler format
+        pattern = r'<details>\s*<summary>(.+?)</summary>\s*\n\n```\s*(.*?)\s*```\s*</details>'
+        replacement = r'>! \1\n\n```\n\2\n```\n!<'
+        reddit_md = re.sub(pattern, replacement, reddit_md, flags=re.DOTALL)
+        
+        return reddit_md
 
     # Add this method to ModpackChangelogApp class
     def toggle_dropdown(self):
@@ -603,6 +891,141 @@ class ModpackChangelogApp:
         else:
             self.dropdown_menu.pack(fill="x", padx=10, pady=5)
             self.dropdown_button.config(text="Sections to Include ▲")
+
+    def stop_generation(self):
+        """Stop the changelog generation process"""
+        self.is_cancelled = True
+        self.status_label.config(text="Cancelling generation...")
+        # The thread will check this flag and terminate gracefully
+
+    def _handle_generation_end(self):
+        """Reset UI state after generation ends for any reason"""
+        self.generate_button.config(state=tk.NORMAL)
+        self.stop_button.config(state=tk.DISABLED)
+        
+        if self.is_cancelled:
+            self.status_label.config(text="Generation cancelled")
+    
+    def search_changelog(self):
+        """Search for text in the changelog"""
+        search_text = self.search_var.get().lower()
+        if not search_text or not hasattr(self, 'changelog'):
+            return
+        
+        # Reset any previous search formatting
+        self.text_area.tag_remove("search", "1.0", tk.END)
+        
+        # Configure tag for highlighting
+        self.text_area.tag_configure("search", background="yellow")
+        
+        # Search and highlight
+        start_pos = "1.0"
+        while True:
+            start_pos = self.text_area.search(search_text, start_pos, tk.END, nocase=True)
+            if not start_pos:
+                break
+                
+            end_pos = f"{start_pos}+{len(search_text)}c"
+            self.text_area.tag_add("search", start_pos, end_pos)
+            start_pos = end_pos
+        
+        # Count matches
+        matches = len(self.text_area.tag_ranges("search")) // 2
+        self.status_label.config(text=f"Found {matches} matches for '{search_text}'")
+        
+        # Scroll to first match if found
+        if matches > 0:
+            self.text_area.see("search.first")
+
+    def clear_search(self):
+        """Clear search highlights"""
+        self.search_var.set("")
+        self.text_area.tag_remove("search", "1.0", tk.END)
+        if hasattr(self, 'changelog'):
+            self.status_label.config(text="Changelog generation complete")
+
+    def apply_filter(self, selection):
+        """Filter the changelog to show only selected section"""
+        if not hasattr(self, 'changelog'):
+            return
+            
+        # Reset to full changelog
+        self.text_area.delete(1.0, tk.END)
+        
+        if selection == "All":
+            self.text_area.insert(tk.END, self.changelog)
+            return
+        
+        # Split changelog by sections
+        sections = re.split(r'(## .*?\n)', self.changelog)
+        
+        # Find and display requested section
+        section_content = ""
+        capturing = False
+        section_found = False
+        
+        for i, section in enumerate(sections):
+            if section.startswith(f"## {selection}") or (selection == "Config Changes" and section.startswith("## Config Changes")):
+                capturing = True
+                section_found = True
+                section_content += section
+            elif capturing and i < len(sections) - 1 and sections[i+1].startswith("## "):
+                capturing = False
+            elif capturing:
+                section_content += section
+        
+        if section_found:
+            self.text_area.insert(tk.END, section_content)
+            self.status_label.config(text=f"Filtered: Showing only {selection}")
+        else:
+            self.text_area.insert(tk.END, f"No {selection} section found in the changelog.")
+    
+    def _detect_versions(self, old_path, new_path):
+        """Attempt to detect modpack versions from filenames or manifest data"""
+        old_ver = "Old Version"
+        new_ver = "New Version"
+        
+        # Try from filenames first
+        old_basename = os.path.basename(old_path).replace('.zip', '')
+        new_basename = os.path.basename(new_path).replace('.zip', '')
+        
+        # Look for version patterns in filenames (like v1.2.3, 1.2.3, etc.)
+        version_pattern = r'[-_]?v?(\d+\.\d+(?:\.\d+)?(?:[a-z]?(?:\d+)?)?)'
+        
+        old_match = re.search(version_pattern, old_basename, re.IGNORECASE)
+        if old_match:
+            old_ver = old_match.group(1)
+        
+        new_match = re.search(version_pattern, new_basename, re.IGNORECASE)
+        if new_match:
+            new_ver = new_match.group(1)
+        
+        # Try from manifest.json if available
+        try:
+            old_manifest_path = extract_file_from_zip(old_path, "manifest.json")
+            if old_manifest_path:
+                with open(old_manifest_path, 'r', encoding='utf-8') as f:
+                    data = json.load(f)
+                    if "version" in data:
+                        old_ver = data["version"]
+                    elif "minecraft" in data and "version" in data["minecraft"]:
+                        old_ver = f"MC-{data['minecraft']['version']}"
+        except:
+            pass  # Use already detected version
+        
+        try:
+            new_manifest_path = extract_file_from_zip(new_path, "manifest.json")
+            if new_manifest_path:
+                with open(new_manifest_path, 'r', encoding='utf-8') as f:
+                    data = json.load(f)
+                    if "version" in data:
+                        new_ver = data["version"]
+                    elif "minecraft" in data and "version" in data["minecraft"]:
+                        new_ver = f"MC-{data['minecraft']['version']}"
+        except:
+            pass  # Use already detected version
+        
+        return old_ver, new_ver
 
 if __name__ == "__main__":
     root = tk.Tk()
