@@ -289,9 +289,14 @@ def generate_changelog(old_zip, new_zip, include_updated_mods=True, include_chan
         if config_changes:
             changelog += "## Config Changes\n"
             for config, diff in config_changes.items():
-                if diff.strip():  # Only include changes, not new or removed files
-                    changelog += f"### {config}\n"
-                    changelog += format_diff(diff)
+                # Only include non-empty changes
+                if diff.strip():
+                    formatted_diff = format_diff_for_display(diff)
+                    # Skip this config if there are no actual changes after formatting
+                    if formatted_diff.strip():
+                        changelog += f"<details>\n<summary><strong>{config}</strong></summary>\n\n```\n"
+                        changelog += formatted_diff
+                        changelog += "\n```\n</details>\n\n"
     
     if include_options_changes:
         old_options = extract_file_from_zip(old_zip, "overrides/options.txt")
@@ -766,10 +771,14 @@ class ModpackChangelogApp:
             if config_changes:
                 changelog += "## Config Changes\n"
                 for config, diff in config_changes.items():
-                    if diff.strip():  # Only include changes, not new or removed files
-                        changelog += f"<details>\n<summary><strong>{config}</strong></summary>\n\n```\n"
-                        changelog += format_diff_for_display(diff)  # Use the new function here
-                        changelog += "\n```\n</details>\n\n"
+                    # Only include non-empty changes
+                    if diff.strip():
+                        formatted_diff = format_diff_for_display(diff)
+                        # Skip this config if there are no actual changes after formatting
+                        if formatted_diff.strip():
+                            changelog += f"<details>\n<summary><strong>{config}</strong></summary>\n\n```\n"
+                            changelog += formatted_diff
+                            changelog += "\n```\n</details>\n\n"
         
         if self.include_options_changes.get():
             old_options = extract_file_from_zip(old_zip, "overrides/options.txt")
@@ -956,25 +965,12 @@ class ModpackChangelogApp:
             self.text_area.insert(tk.END, self.changelog)
             return
         
-        # Split changelog by sections
-        sections = re.split(r'(## .*?\n)', self.changelog)
+        # Use regex to find the specific section and its content
+        pattern = f"## {selection}.*?(?=## |$)"
+        match = re.search(pattern, self.changelog, re.DOTALL)
         
-        # Find and display requested section
-        section_content = ""
-        capturing = False
-        section_found = False
-        
-        for i, section in enumerate(sections):
-            if section.startswith(f"## {selection}") or (selection == "Config Changes" and section.startswith("## Config Changes")):
-                capturing = True
-                section_found = True
-                section_content += section
-            elif capturing and i < len(sections) - 1 and sections[i+1].startswith("## "):
-                capturing = False
-            elif capturing:
-                section_content += section
-        
-        if section_found:
+        if match:
+            section_content = match.group(0)
             self.text_area.insert(tk.END, section_content)
             self.status_label.config(text=f"Filtered: Showing only {selection}")
         else:
