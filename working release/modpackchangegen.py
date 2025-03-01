@@ -203,11 +203,18 @@ def extract_and_compare_datapacks(old_zip, new_zip):
     
     return datapack_changes
 
+# Fix the extract_and_compare_custom_mods function
 def extract_and_compare_custom_mods(old_zip, new_zip):
-    old_mods = extract_files_from_zip(old_zip, "mods/")
-    new_mods = extract_files_from_zip(new_zip, "mods/")
-    added_mods = set(new_mods.keys()) - set(old_mods.keys())
-    removed_mods = set(old_mods.keys()) - set(new_mods.keys())
+    # Change "mods/" to "overrides/mods/"
+    old_mods = extract_files_from_zip(old_zip, "overrides/mods/")
+    new_mods = extract_files_from_zip(new_zip, "overrides/mods/")
+    
+    # Filter for only JAR files to avoid processing directories or other files
+    old_mod_files = {path for path in old_mods.keys() if path.lower().endswith('.jar')}
+    new_mod_files = {path for path in new_mods.keys() if path.lower().endswith('.jar')}
+    
+    added_mods = new_mod_files - old_mod_files
+    removed_mods = old_mod_files - new_mod_files
     return added_mods, removed_mods
 
 def extract_files_from_zip(zip_path, folder):
@@ -328,20 +335,41 @@ class ModpackChangelogApp:
         tk.Entry(frame, textvariable=self.new_folder, width=50).grid(row=1, column=1, padx=5, pady=5)
         tk.Button(frame, text="Browse", command=self.select_new_folder).grid(row=1, column=2, padx=5, pady=5)
         
+        # Create dropdown menu for settings
+        settings_frame = tk.LabelFrame(self.root, text="Changelog Settings")
+        settings_frame.pack(pady=10, padx=10, fill="x")
+
+        # Define settings variables
         self.include_updated_mods = tk.BooleanVar(value=True)
         self.include_changed_configs = tk.BooleanVar(value=True)
         self.include_added_removed_mods = tk.BooleanVar(value=True)
         self.include_datapacks = tk.BooleanVar(value=True)
         self.include_options_changes = tk.BooleanVar(value=True)
-        
-        settings_frame = tk.LabelFrame(self.root, text="Changelog Settings")
-        settings_frame.pack(pady=10, padx=10, fill="x")
-        
-        tk.Checkbutton(settings_frame, text="Include Updated Mods", variable=self.include_updated_mods).pack(anchor="w")
-        tk.Checkbutton(settings_frame, text="Include Changed Configs", variable=self.include_changed_configs).pack(anchor="w")
-        tk.Checkbutton(settings_frame, text="Include Added/Removed Mods", variable=self.include_added_removed_mods).pack(anchor="w")
-        tk.Checkbutton(settings_frame, text="Include Datapacks", variable=self.include_datapacks).pack(anchor="w")
-        tk.Checkbutton(settings_frame, text="Include Options Changes", variable=self.include_options_changes).pack(anchor="w")
+        self.include_custom_mods = tk.BooleanVar(value=True)
+
+        # Create dropdown button
+        self.dropdown_button = tk.Button(settings_frame, text="Sections to Include ▼", 
+                                        command=self.toggle_dropdown)
+        self.dropdown_button.pack(anchor="w", padx=10, pady=5)
+
+        # Create dropdown menu (hidden initially)
+        self.dropdown_menu = tk.Frame(settings_frame, relief=tk.RAISED, borderwidth=1)
+        self.dropdown_menu.pack(fill="x", padx=10, pady=5)
+        self.dropdown_menu.pack_forget()  # Hide initially
+
+        # Add checkboxes to the dropdown
+        tk.Checkbutton(self.dropdown_menu, text="Updated Mods", 
+                    variable=self.include_updated_mods).pack(anchor="w", padx=5, pady=2)
+        tk.Checkbutton(self.dropdown_menu, text="Changed Configs", 
+                    variable=self.include_changed_configs).pack(anchor="w", padx=5, pady=2)
+        tk.Checkbutton(self.dropdown_menu, text="Added/Removed Mods", 
+                    variable=self.include_added_removed_mods).pack(anchor="w", padx=5, pady=2)
+        tk.Checkbutton(self.dropdown_menu, text="Datapacks", 
+                    variable=self.include_datapacks).pack(anchor="w", padx=5, pady=2)
+        tk.Checkbutton(self.dropdown_menu, text="Options Changes", 
+                    variable=self.include_options_changes).pack(anchor="w", padx=5, pady=2)
+        tk.Checkbutton(self.dropdown_menu, text="Custom Mods (overrides/mods folder)", 
+                    variable=self.include_custom_mods).pack(anchor="w", padx=5, pady=2)
         
         tk.Button(self.root, text="Generate Changelog", command=self.generate_changelog).pack(pady=10)
         tk.Button(self.root, text="Save Changelog", command=self.save_changelog).pack(pady=10)
@@ -358,6 +386,18 @@ class ModpackChangelogApp:
         
         self.text_area = scrolledtext.ScrolledText(self.root, wrap=tk.WORD, width=100, height=30)
         self.text_area.pack(padx=10, pady=10, fill=tk.BOTH, expand=True)
+        
+        # Add this to ModpackChangelogApp.__init__ after creating the dropdown
+        # Close dropdown when clicking elsewhere
+        def close_dropdown(event):
+            if self.dropdown_menu.winfo_viewable():
+                # Check if click is outside the dropdown area
+                if not (self.dropdown_button.winfo_containing(event.x_root, event.y_root) or
+                        self.dropdown_menu.winfo_containing(event.x_root, event.y_root)):
+                    self.dropdown_menu.pack_forget()
+                    self.dropdown_button.config(text="Sections to Include ▼")
+                    
+        self.root.bind('<Button-1>', close_dropdown)
     
     def select_old_folder(self):
         self.old_folder.set(filedialog.askopenfilename(filetypes=[("ZIP files", "*.zip")]))
@@ -395,57 +435,64 @@ class ModpackChangelogApp:
             old_mods = extract_mods_from_manifest(old_manifest) if old_manifest else {}
             new_mods = extract_mods_from_manifest(new_manifest) if new_manifest else {}
             
-            # Setup for tracking updated mods
-            updated_mods_count = 0
-            potential_updated_mods = 0
+            # Initialize empty updated_mods
+            updated_mods = {}
             
-            for project_id, new_file_id in new_mods.items():
-                old_file_id = old_mods.get(project_id)
-                if old_file_id and old_file_id != new_file_id:
-                    potential_updated_mods += 1
-            
-            # Only proceed if we have mods to update
-            if potential_updated_mods > 0:
-                browser = PersistentChromeBrowser()
+            # Only fetch mod updates if the option is enabled
+            if self.include_updated_mods.get():
+                # Setup for tracking updated mods
+                updated_mods_count = 0
+                potential_updated_mods = 0
                 
-                try:
-                    # Fetch mod info concurrently
-                    with ThreadPoolExecutor() as executor:
-                        mod_infos = {project_id: executor.submit(fetch_mod_info_from_cflookup, project_id) 
-                                    for project_id in new_mods}
+                for project_id, new_file_id in new_mods.items():
+                    old_file_id = old_mods.get(project_id)
+                    if old_file_id and old_file_id != new_file_id:
+                        potential_updated_mods += 1
+                
+                # Only proceed if we have mods to update
+                if potential_updated_mods > 0:
+                    browser = PersistentChromeBrowser()
                     
-                    # Process each mod with progress updates
-                    updated_mods = {}
-                    for project_id, new_file_id in new_mods.items():
-                        old_file_id = old_mods.get(project_id)
+                    try:
+                        # Fetch mod info concurrently
+                        with ThreadPoolExecutor() as executor:
+                            mod_infos = {project_id: executor.submit(fetch_mod_info_from_cflookup, project_id) 
+                                        for project_id in new_mods}
                         
-                        if old_file_id and old_file_id != new_file_id:
-                            # Update status
-                            mod_name, mod_url = mod_infos[project_id].result()
-                            self.root.after(0, lambda text=f"Fetching: {mod_name}": 
-                                self.status_label.config(text=text))
+                        # Process each mod with progress updates
+                        for project_id, new_file_id in new_mods.items():
+                            old_file_id = old_mods.get(project_id)
                             
-                            # Fetch versions
-                            old_version = fetch_mod_version(mod_url, old_file_id, browser)
-                            new_version = fetch_mod_version(mod_url, new_file_id, browser)
-                            updated_mods[mod_name] = f"{old_version} → {new_version}"
-                            
-                            # Update progress
-                            updated_mods_count += 1
-                            progress = (updated_mods_count / potential_updated_mods) * 100
-                            self.root.after(0, lambda p=progress: self._update_progress(p))
-                    
-                finally:
-                    browser.close()
-                
-                # Generate the changelog
-                self.root.after(0, lambda: self.status_label.config(text="Generating changelog..."))
-                self.changelog = self._generate_full_changelog(old_path, new_path, updated_mods)
-                
-                # Update UI with result
-                self.root.after(0, lambda: self._update_ui_with_changelog())
-            else:
-                self.root.after(0, lambda: self.status_label.config(text="No mod updates found"))
+                            if old_file_id and old_file_id != new_file_id:
+                                # Update status
+                                mod_name, mod_url = mod_infos[project_id].result()
+                                self.root.after(0, lambda text=f"Fetching: {mod_name}": 
+                                    self.status_label.config(text=text))
+                                
+                                # Fetch versions
+                                old_version = fetch_mod_version(mod_url, old_file_id, browser)
+                                new_version = fetch_mod_version(mod_url, new_file_id, browser)
+                                
+                                # Store both version info and URL
+                                updated_mods[mod_name] = {
+                                    "version": f"{old_version} → {new_version}",
+                                    "url": mod_url
+                                }
+                                
+                                # Update progress
+                                updated_mods_count += 1
+                                progress = (updated_mods_count / potential_updated_mods) * 100
+                                self.root.after(0, lambda p=progress: self._update_progress(p))
+                        
+                    finally:
+                        browser.close()
+            
+            # Generate the changelog
+            self.root.after(0, lambda: self.status_label.config(text="Generating changelog..."))
+            self.changelog = self._generate_full_changelog(old_path, new_path, updated_mods)
+            
+            # Update UI with result
+            self.root.after(0, lambda: self._update_ui_with_changelog())
                 
         except Exception as e:
             self.root.after(0, lambda: messagebox.showerror("Error", f"An error occurred: {str(e)}"))
@@ -488,7 +535,31 @@ class ModpackChangelogApp:
                 changelog += "## Removed Mods\n" + "\n".join(f"- ~~[{mod}]({old_mod_links.get(mod, '#')})~~" for mod in removed) + "\n\n"
         
         if self.include_updated_mods.get() and updated_mods:
-            changelog += "## Updated Mods\n" + "\n".join(f"- **[{name}]({new_mod_links.get(name, '#')})**: {version}" for name, version in updated_mods.items()) + "\n\n"
+            changelog += "## Updated Mods\n" + "\n".join(
+                f"- **[{name}]({info['url'] or '#'})**: {info['version']}" 
+                for name, info in updated_mods.items()
+            ) + "\n\n"
+        
+        if self.include_custom_mods.get():
+            # Check for custom mods in overrides/mods folder
+            added_custom_mods, removed_custom_mods = extract_and_compare_custom_mods(old_zip, new_zip)
+            
+            if added_custom_mods or removed_custom_mods:
+                changelog += "## Custom Mods Changes (overrides/mods folder)\n"
+                
+                if added_custom_mods:
+                    changelog += "### Added Custom Mods\n"
+                    for mod in sorted(added_custom_mods):
+                        mod_name = os.path.basename(mod)
+                        changelog += f"- **{mod_name}**\n"
+                    changelog += "\n"
+                
+                if removed_custom_mods:
+                    changelog += "### Removed Custom Mods\n"
+                    for mod in sorted(removed_custom_mods):
+                        mod_name = os.path.basename(mod)
+                        changelog += f"- ~~{mod_name}~~\n"
+                    changelog += "\n"
         
         if self.include_datapacks.get():
             datapack_changes = extract_and_compare_datapacks(old_zip, new_zip)
@@ -523,6 +594,15 @@ class ModpackChangelogApp:
         if file_path:
             with open(file_path, "w", encoding="utf-8") as file:
                 file.write(self.changelog)
+
+    # Add this method to ModpackChangelogApp class
+    def toggle_dropdown(self):
+        if self.dropdown_menu.winfo_viewable():
+            self.dropdown_menu.pack_forget()
+            self.dropdown_button.config(text="Sections to Include ▼")
+        else:
+            self.dropdown_menu.pack(fill="x", padx=10, pady=5)
+            self.dropdown_button.config(text="Sections to Include ▲")
 
 if __name__ == "__main__":
     root = tk.Tk()
