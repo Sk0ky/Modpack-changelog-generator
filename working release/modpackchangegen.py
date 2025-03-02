@@ -420,6 +420,7 @@ class ModpackChangelogApp:
         self.include_datapacks = tk.BooleanVar(value=True)
         self.include_options_changes = tk.BooleanVar(value=True)
         self.include_custom_mods = tk.BooleanVar(value=True)
+        self.use_div_spoilers = tk.BooleanVar(value=True)
 
         # Create dropdown button
         self.dropdown_button = tk.Button(settings_frame, text="Sections to Include ▼", 
@@ -459,12 +460,11 @@ class ModpackChangelogApp:
 
         self.save_button = tk.Button(button_frame, text="Save Changelog", command=self.save_changelog)
         self.save_button.pack(side=tk.LEFT, padx=5)
-
-        # Remove the old buttons that are now in the button_frame
-        # (Delete these two lines)
-        # tk.Button(self.root, text="Generate Changelog", command=self.generate_changelog).pack(pady=10)
-        # tk.Button(self.root, text="Save Changelog", command=self.save_changelog).pack(pady=10)
-
+        
+        # Add the CurseForge spoilers checkbox next to the save button for better visibility
+        tk.Checkbutton(button_frame, text="Use <div> spoilers for CurseForge", 
+                  variable=self.use_div_spoilers).pack(side=tk.LEFT, padx=10)
+        
         # Add cancellation flag
         self.is_cancelled = False
         
@@ -692,8 +692,6 @@ class ModpackChangelogApp:
     
     def _generate_full_changelog(self, old_zip, new_zip, updated_mods):
         # Extract all the non-mod version parts of the changelog generation
-        # This code is similar to the existing generate_changelog function but uses
-        # the already fetched updated_mods instead of fetching them again
         
         old_manifest = extract_file_from_zip(old_zip, "manifest.json")
         new_manifest = extract_file_from_zip(new_zip, "manifest.json")
@@ -711,9 +709,6 @@ class ModpackChangelogApp:
         
         old_ver, new_ver = self._detect_versions(old_zip, new_zip)
         changelog = f"# Modpack Changelog: {old_ver} → {new_ver}\n\n"
-        
-        # Also add a version summary section at the top
-        changelog += f"*Updated from version {old_ver} to {new_ver}*\n\n"
         
         if self.include_added_removed_mods.get():
             if added:
@@ -855,31 +850,49 @@ class ModpackChangelogApp:
             return f"<html><body>{simple_html}</body></html>"
 
     def _convert_to_bbcode(self):
-        """Convert the markdown changelog to BBCode for forums"""
-        bbcode = self.changelog
+        """Convert the markdown changelog to CurseForge-compatible format"""
+        content = self.changelog
         
-        # Headers
-        bbcode = re.sub(r'^# (.+)$', r'[size=6][b]\1[/b][/size]', bbcode, flags=re.MULTILINE)
-        bbcode = re.sub(r'^## (.+)$', r'[size=5][b]\1[/b][/size]', bbcode, flags=re.MULTILINE)
-        bbcode = re.sub(r'^### (.+)$', r'[size=4][b]\1[/b][/size]', bbcode, flags=re.MULTILINE)
+        # First, extract all spoiler blocks before any other transformations
+        spoiler_blocks = {}
+        pattern = r'<details>\s*<summary>(.+?)</summary>([\s\S]*?)</details>'
         
-        # Links
-        bbcode = re.sub(r'\[(.+?)\]\((.+?)\)', r'[url=\2]\1[/url]', bbcode)
+        def extract_spoiler(match):
+            placeholder = f"SPOILER_PLACEHOLDER_{len(spoiler_blocks)}"
+            spoiler_blocks[placeholder] = {
+                'title': match.group(1),
+                'content': match.group(2).strip()
+            }
+            return placeholder
         
-        # Bold
-        bbcode = re.sub(r'\*\*(.+?)\*\*', r'[b]\1[/b]', bbcode)
+        # Extract spoilers first
+        content = re.sub(pattern, extract_spoiler, content)
         
-        # Code blocks
-        bbcode = re.sub(r'```(?:\w+)?\n(.*?)\n```', r'[code]\1[/code]', bbcode, flags=re.DOTALL)
+        # Process spoiler blocks
+        for placeholder, data in spoiler_blocks.items():
+            spoiler_content = data['content']
+            
+            # Process code blocks within spoilers
+            spoiler_content = re.sub(r'```(?:\w+)?\n(.*?)\n```', r'\1', spoiler_content, flags=re.DOTALL)
+            
+            # Format the spoiler based on the selected option
+            if self.use_div_spoilers.get():
+                # New format - using div.spoiler with <br> for line breaks
+                spoiler_content = spoiler_content.replace('\n', '<br>')
+                spoiler_div = f'<div class="spoiler">{spoiler_content}</div>'
+            else:
+                # Original format - using BBCode spoiler tags
+                # No need to replace newlines with <br>
+                spoiler_div = f'[spoiler]{spoiler_content}[/spoiler]'
+            
+            # Replace the placeholder
+            content = content.replace(placeholder, spoiler_div)
         
-        # Lists
-        bbcode = re.sub(r'^- ', r'[*] ', bbcode, flags=re.MULTILINE)
+        # Clean up any numeric artifacts after spoiler divs (only for div format)
+        if self.use_div_spoilers.get():
+            content = re.sub(r'</div>\d+', '</div>', content)
         
-        # Spoiler tags (for detailed sections)
-        bbcode = re.sub(r'<details>\s*<summary>(.+?)</summary>', r'[spoiler=\1]', bbcode)
-        bbcode = re.sub(r'</details>', r'[/spoiler]', bbcode)
-        
-        return bbcode
+        return content
 
     def _convert_to_reddit(self):
         """Convert to Reddit-friendly markdown"""
