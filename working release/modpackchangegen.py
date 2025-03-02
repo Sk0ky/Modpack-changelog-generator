@@ -530,6 +530,12 @@ class ModpackChangelogApp:
         filter_options = ["All", "Added Mods", "Removed Mods", "Updated Mods", "Config Changes"]
         tk.Label(search_frame, text="Filter:").pack(side="left", padx=10)
         tk.OptionMenu(search_frame, self.filter_var, *filter_options, command=self.apply_filter).pack(side="left")
+        
+        # Add the preview formatting option next to the spoiler format checkbox
+        self.preview_formatting = tk.BooleanVar(value=False)
+        tk.Checkbutton(button_frame, text="Preview Formatting", 
+                    command=self._toggle_preview_formatting,
+                    variable=self.preview_formatting).pack(side=tk.LEFT, padx=10)
     
     def load_recent_files(self):
         try:
@@ -685,7 +691,14 @@ class ModpackChangelogApp:
     
     def _update_ui_with_changelog(self):
         self.text_area.delete(1.0, tk.END)
-        self.text_area.insert(tk.END, self.changelog)
+        
+        # Show formatted content if preview option is enabled
+        if self.preview_formatting.get():
+            formatted_content = self._convert_to_bbcode()
+            self.text_area.insert(tk.END, formatted_content)
+        else:
+            self.text_area.insert(tk.END, self.changelog)
+        
         self.status_label.config(text="Changelog generation complete")
         self.progress_bar["value"] = 100
         self._handle_generation_end()  # Reset buttons
@@ -1035,6 +1048,20 @@ class ModpackChangelogApp:
             pass  # Use already detected version
         
         return old_ver, new_ver
+
+    def _toggle_preview_formatting(self):
+        """Toggle between raw markdown and formatted preview"""
+        if hasattr(self, 'changelog'):
+            if self.preview_formatting.get():
+                # Convert to BBCode/HTML format for preview
+                formatted_content = self._convert_to_bbcode()
+                self.text_area.delete(1.0, tk.END)
+                self.text_area.insert(tk.END, formatted_content)
+                self.status_label.config(text="Showing formatted preview (CurseForge format)")
+            else:
+                # Show original markdown
+                self.text_area.delete(1.0, tk.END)
+                self.text_area.insert(tk.END, self.changelog)
 
 if __name__ == "__main__":
     root = tk.Tk()
